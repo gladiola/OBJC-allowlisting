@@ -1,0 +1,37 @@
+# /etc/relayd.conf — example OpenBSD relayd configuration
+#
+# relayd terminates TLS from clients and forwards plain HTTP to httpd running
+# on localhost.  All request validation logic lives inside the httpd/CGI layer;
+# relayd is responsible only for TLS offloading and load-balancing.
+#
+# Prerequisites:
+#   1. Generate or obtain TLS certificate and key (same files as in httpd.conf):
+#        /etc/ssl/example.com.crt
+#        /etc/ssl/example.com.key
+#   2. Enable and start relayd:
+#        rcctl enable relayd
+#        rcctl start relayd
+
+# The httpd backend listening on localhost
+table <httpd_hosts> { 127.0.0.1 }
+
+http protocol "https_relay" {
+    tls { certificate "/etc/ssl/example.com.crt"
+          key         "/etc/ssl/example.com.key" }
+
+    # Pass the real client IP to the backend via X-Forwarded-For
+    match request header append "X-Forwarded-For" value "$REMOTE_ADDR"
+    match request header set    "X-Forwarded-Proto" value "https"
+
+    # Block requests with oversized bodies early (1 MB hard limit)
+    match request header "Content-Length" value ">1048576" block
+
+    # Forward all traffic to the httpd backend
+    pass
+}
+
+relay "https_to_httpd" {
+    listen on 0.0.0.0 port 443 tls
+    protocol "https_relay"
+    forward to <httpd_hosts> port 80
+}

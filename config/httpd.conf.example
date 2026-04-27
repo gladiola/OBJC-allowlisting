@@ -1,0 +1,67 @@
+# /etc/httpd.conf — example OpenBSD httpd configuration
+#
+# request_validator runs as a CGI program under slowcgi(8).
+# Each protected location points to the same binary but uses a different
+# ALLOWLIST_CONFIG environment variable so each endpoint has its own ruleset.
+#
+# Prerequisites:
+#   1. Install the validator binary:
+#        make install          # copies to /var/www/cgi-bin/request_validator
+#   2. Create allowlist plist files (one per endpoint):
+#        /etc/cgi-allowlist/login.plist
+#        /etc/cgi-allowlist/submit.plist
+#        /etc/cgi-allowlist/upload.plist
+#   3. Enable and start slowcgi:
+#        rcctl enable slowcgi
+#        rcctl start slowcgi
+#   4. Enable and start httpd:
+#        rcctl enable httpd
+#        rcctl start httpd
+
+server "example.com" {
+    listen on * tls port 443
+    tls {
+        certificate "/etc/ssl/example.com.crt"
+        key         "/etc/ssl/example.com.key"
+    }
+
+    # /login  — validates login form fields before passing to the application
+    location "/login" {
+        root    "/cgi-bin"
+        fastcgi {
+            socket  "/run/slowcgi.sock"
+            # Each FastCGI param becomes an environment variable seen by the CGI
+            param   ALLOWLIST_CONFIG "/etc/cgi-allowlist/login.plist"
+        }
+    }
+
+    # /submit-form  — validates the general submission form
+    location "/submit-form" {
+        root    "/cgi-bin"
+        fastcgi {
+            socket  "/run/slowcgi.sock"
+            param   ALLOWLIST_CONFIG "/etc/cgi-allowlist/submit.plist"
+        }
+    }
+
+    # /upload  — validates upload form metadata fields
+    location "/upload" {
+        root    "/cgi-bin"
+        fastcgi {
+            socket  "/run/slowcgi.sock"
+            param   ALLOWLIST_CONFIG "/etc/cgi-allowlist/upload.plist"
+        }
+    }
+
+    # Redirect plain HTTP to HTTPS
+    location "/*" {
+        block return 301 "https://example.com$REQUEST_URI"
+    }
+}
+
+server "example.com" {
+    listen on * port 80
+    location "/*" {
+        block return 301 "https://example.com$REQUEST_URI"
+    }
+}
