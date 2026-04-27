@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//GNUstep//DTD plist 0.9//EN"
+  "http://www.gnustep.org/plist-0_9.xml">
+<!--
+  allowlist.plist — per-endpoint allowlist configuration for request_validator.
+
+  Each top-level key is the name of an expected form field.
+  Each value is a dictionary describing the rule to apply:
+
+    type = "values"  →  "allowed" is an array of accepted literal strings.
+    type = "regex"   →  "pattern" is a regex; the ENTIRE submitted value must
+                        match (i.e. the pattern should be anchored with ^ and $).
+
+  Install this file to /etc/cgi-allowlist/allowlist.plist, or point the
+  ALLOWLIST_CONFIG environment variable at an alternative path.
+
+  Create one file per endpoint and set ALLOWLIST_CONFIG in the httpd.conf
+  fastcgi block for each location (see httpd.conf.example).
+-->
+<plist version="1.0">
+<dict>
+
+    <!-- "action": must be one of three exact strings -->
+    <key>action</key>
+    <dict>
+        <key>type</key>
+        <string>values</string>
+        <key>allowed</key>
+        <array>
+            <string>login</string>
+            <string>logout</string>
+            <string>submit</string>
+        </array>
+    </dict>
+
+    <!-- "username": alphanumeric only, 1–32 characters -->
+    <key>username</key>
+    <dict>
+        <key>type</key>
+        <string>regex</string>
+        <key>pattern</key>
+        <string>^[a-zA-Z0-9]{1,32}$</string>
+    </dict>
+
+    <!-- "token": lowercase or uppercase hex string, exactly 64 characters -->
+    <key>token</key>
+    <dict>
+        <key>type</key>
+        <string>regex</string>
+        <key>pattern</key>
+        <string>^[0-9a-fA-F]{64}$</string>
+    </dict>
+
+</dict>
+</plist>

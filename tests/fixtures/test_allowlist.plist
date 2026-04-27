@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//GNUstep//DTD plist 0.9//EN"
+  "http://www.gnustep.org/plist-0_9.xml">
+<plist version="1.0">
+<dict>
+    <!-- "action" must be one of three exact strings -->
+    <key>action</key>
+    <dict>
+        <key>type</key>    <string>values</string>
+        <key>allowed</key>
+        <array>
+            <string>login</string>
+            <string>logout</string>
+            <string>submit</string>
+        </array>
+    </dict>
+
+    <!-- "username": alphanumeric, 1–32 characters -->
+    <key>username</key>
+    <dict>
+        <key>type</key>    <string>regex</string>
+        <key>pattern</key> <string>^[a-zA-Z0-9]{1,32}$</string>
+    </dict>
+
+    <!-- "token": lowercase hex, exactly 64 characters -->
+    <key>token</key>
+    <dict>
+        <key>type</key>    <string>regex</string>
+        <key>pattern</key> <string>^[0-9a-fA-F]{64}$</string>
+    </dict>
+</dict>
+</plist>
