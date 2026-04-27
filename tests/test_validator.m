@@ -185,8 +185,8 @@ static void testEmptyParams(void)
 {
     RequestValidator *v = makeValidator();
 
-    /* Empty submission is valid (nothing to reject) */
-    ASSERT("empty params accepted",
+    /* Empty submission is valid — the test allowlist has no required fields. */
+    ASSERT("empty params accepted (no required fields)",
            [v validateParams:[NSDictionary dictionary]]);
 }
 
@@ -238,6 +238,113 @@ static void testNilAllowlistPath(void)
     ASSERT("bad path returns nil validator", v == nil);
 }
 
+/* ── Hardening limit tests ─────────────────────────────────────────────── */
+
+static void testParamCountLimit(void)
+{
+    RequestValidator *v = makeValidator();
+
+    /* Build a body with MAX_PARAM_COUNT + 1 pairs to trip the limit. */
+    NSMutableString *body = [NSMutableString string];
+    NSUInteger i;
+    for (i = 0; i <= MAX_PARAM_COUNT; i++) {
+        if (i > 0) [body appendString:@"&"];
+        [body appendFormat:@"k%lu=v", (unsigned long)i];
+    }
+
+    NSString *reason = nil;
+    NSDictionary *p = [v parseFormBody:body rejectionReason:&reason];
+    ASSERT("param count limit: nil returned on overflow", p == nil);
+    ASSERT("param count limit: rejection reason set", reason != nil);
+}
+
+static void testKeyLengthLimit(void)
+{
+    RequestValidator *v = makeValidator();
+
+    /* Build a key one byte longer than the allowed maximum. */
+    NSMutableString *longKey = [NSMutableString string];
+    NSUInteger i;
+    for (i = 0; i <= MAX_PARAM_KEY_LEN; i++)
+        [longKey appendString:@"a"];
+
+    NSString *body = [NSString stringWithFormat:@"%@=v", longKey];
+    NSString *reason = nil;
+    NSDictionary *p = [v parseFormBody:body rejectionReason:&reason];
+    ASSERT("key length limit: nil returned on oversized key", p == nil);
+    ASSERT("key length limit: rejection reason set", reason != nil);
+}
+
+static void testValueLengthLimit(void)
+{
+    RequestValidator *v = makeValidator();
+
+    /* Build a value one byte longer than the allowed maximum. */
+    NSMutableString *longVal = [NSMutableString string];
+    NSUInteger j;
+    for (j = 0; j <= MAX_PARAM_VALUE_LEN; j++)
+        [longVal appendString:@"a"];
+
+    NSString *body = [NSString stringWithFormat:@"k=%@", longVal];
+    NSString *reason = nil;
+    NSDictionary *p = [v parseFormBody:body rejectionReason:&reason];
+    ASSERT("value length limit: nil returned on oversized value", p == nil);
+    ASSERT("value length limit: rejection reason set", reason != nil);
+}
+
+static void testRequiredField(void)
+{
+    /* Build an allowlist where "action" is required. */
+    NSArray *actionValues = [NSArray arrayWithObjects:@"login", @"logout", nil];
+    NSDictionary *actionRule = [NSDictionary dictionaryWithObjectsAndKeys:
+                                    @"values",                      @"type",
+                                    actionValues,                   @"allowed",
+                                    [NSNumber numberWithBool:YES],  @"required",
+                                    nil];
+    NSDictionary *allowlist = [NSDictionary dictionaryWithObject:actionRule
+                                                          forKey:@"action"];
+    RequestValidator *v = [[[RequestValidator alloc]
+                               initWithAllowlist:allowlist] autorelease];
+
+    /* Empty submission — required field absent — must be rejected. */
+    NSString *reason = nil;
+    BOOL r1 = [v validateParams:[NSDictionary dictionary]
+                rejectionReason:&reason];
+    ASSERT("required field: empty submission rejected", !r1);
+    ASSERT("required field: rejection reason set", reason != nil);
+
+    /* Submission including the required field — must be accepted. */
+    BOOL r2 = [v validateParams:
+                   [NSDictionary dictionaryWithObject:@"login" forKey:@"action"]
+               rejectionReason:NULL];
+    ASSERT("required field: present field accepted", r2);
+
+    /* Submission with wrong value for required field — must be rejected. */
+    BOOL r3 = [v validateParams:
+                   [NSDictionary dictionaryWithObject:@"HACK" forKey:@"action"]
+               rejectionReason:NULL];
+    ASSERT("required field: bad value for required field rejected", !r3);
+}
+
+static void testRejectionReasonPropagation(void)
+{
+    RequestValidator *v = makeValidator();
+    NSString *reason = nil;
+
+    /* Unknown key */
+    BOOL r1 = [v validateParams:
+                   [NSDictionary dictionaryWithObject:@"x" forKey:@"evil"]
+               rejectionReason:&reason];
+    ASSERT("rejection reason: unknown key sets reason", !r1 && reason != nil);
+
+    /* Bad value */
+    reason = nil;
+    BOOL r2 = [v validateParams:
+                   [NSDictionary dictionaryWithObject:@"HACK" forKey:@"action"]
+               rejectionReason:&reason];
+    ASSERT("rejection reason: bad value sets reason", !r2 && reason != nil);
+}
+
 /* ── Entry point ───────────────────────────────────────────────────────── */
 
 int main(int argc, const char *argv[])
@@ -253,6 +360,11 @@ int main(int argc, const char *argv[])
     testAllParamsValid();
     testLoadFromFile();
     testNilAllowlistPath();
+    testParamCountLimit();
+    testKeyLengthLimit();
+    testValueLengthLimit();
+    testRequiredField();
+    testRejectionReasonPropagation();
 
     fprintf(stdout, "\n%d passed, %d failed\n", g_passed, g_failed);
 
