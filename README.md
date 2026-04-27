@@ -129,3 +129,109 @@ rcctl start  slowcgi
 
 See `config/httpd.conf.example` and `config/relayd.conf.example` for full
 server configuration examples.
+
+## Adding a new endpoint
+
+Follow these three steps each time you want to protect a new page/form.
+
+### Step 1 — Create the allowlist plist
+
+Create a new plist file under `/etc/cgi-allowlist/` named after your endpoint.
+For example, to protect a contact form at `/contact`:
+
+```sh
+cp config/allowlist.plist.example /etc/cgi-allowlist/contact.plist
+$EDITOR /etc/cgi-allowlist/contact.plist
+```
+
+Edit the file so it lists **only** the fields your form submits.  Delete any
+entries you don't need and add new ones.  There are two rule types:
+
+**`values` — exact match against a fixed list**
+
+Use this when a field must be one of a small set of known strings (e.g. a
+hidden `action` field or a radio-button choice):
+
+```xml
+<key>subject</key>
+<dict>
+    <key>type</key>
+    <string>values</string>
+    <key>allowed</key>
+    <array>
+        <string>sales</string>
+        <string>support</string>
+        <string>billing</string>
+    </array>
+</dict>
+```
+
+**`regex` — full-string regular expression match**
+
+Use this for free-form text fields.  The pattern must match the **entire**
+submitted value (anchoring with `^` and `$` is required):
+
+```xml
+<key>email</key>
+<dict>
+    <key>type</key>
+    <string>regex</string>
+    <key>pattern</key>
+    <string>^[a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,255}$</string>
+</dict>
+
+<key>message</key>
+<dict>
+    <key>type</key>
+    <string>regex</string>
+    <!-- printable ASCII, 1–1000 characters -->
+    <key>pattern</key>
+    <string>^[ -~]{1,1000}$</string>
+</dict>
+```
+
+> **Important:** every field your HTML form can submit must have an entry in
+> the plist.  Any key not listed is automatically rejected with 403 Forbidden.
+
+### Step 2 — Add a `location` block to httpd.conf
+
+Open `/etc/httpd.conf` and add a `location` block for the new path.  Point the
+`ALLOWLIST_CONFIG` param at the plist you just created:
+
+```
+location "/contact" {
+    root    "/cgi-bin"
+    fastcgi {
+        socket  "/run/slowcgi.sock"
+        param   ALLOWLIST_CONFIG "/etc/cgi-allowlist/contact.plist"
+    }
+}
+```
+
+Place this block inside the relevant `server { }` stanza, before any catch-all
+`location "/*"` block.
+
+### Step 3 — Reload httpd and verify
+
+```sh
+rcctl reload httpd
+```
+
+Test a valid submission (should return `200 OK`):
+
+```sh
+curl -s -o /dev/null -w "%{http_code}" \
+     -X POST https://example.com/contact \
+     -d "subject=sales&email=user@example.com&message=Hello"
+# → 200
+```
+
+Test a rejected submission — unexpected key or bad value (should return
+`403 Forbidden`):
+
+```sh
+curl -s -o /dev/null -w "%{http_code}" \
+     -X POST https://example.com/contact \
+     -d "subject=sales&evil=<script>alert(1)</script>"
+# → 403
+```
