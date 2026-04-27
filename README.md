@@ -9,28 +9,56 @@ behind an optional `relayd(8)` TLS relay.
 
 1. `httpd` receives a POST (or GET) request and hands it to `request_validator`
    through the CGI interface provided by `slowcgi`.
-2. The validator reads the request body from `stdin` (POST) or `QUERY_STRING`
-   (GET) and URL-decodes each `key=value` pair.
-3. Every submitted key is checked against an allowlist loaded from a plist file.
+2. The validator caches the client IP (`REMOTE_ADDR`) for use in all subsequent
+   log messages.
+3. On OpenBSD, `unveil(2)` restricts filesystem access to `/etc/cgi-allowlist`
+   only, and `pledge(2)` drops all syscall capabilities except `stdio` and
+   `rpath`.
+4. The validator checks the `ALLOWLIST_CONFIG` environment variable.  If set,
+   it must point inside `/etc/cgi-allowlist/` and must not contain `..`;
+   violations are rejected with 400 and logged.
+5. POST requests must declare `Content-Type: application/x-www-form-urlencoded`
+   or the request is rejected with 415 and logged.  A 30-second alarm timer
+   ensures a slow or stalled POST client cannot tie up the process indefinitely.
+6. The raw body (POST) or query string (GET) is parsed into `key=value` pairs.
+   Requests exceeding any of the following hard limits are rejected with 400
+   and logged:
+   - More than **64 parameters** per request
+   - Any parameter key longer than **256 bytes**
+   - Any parameter value longer than **4096 bytes**
+7. Every submitted key is checked against an allowlist loaded from a plist file.
    Each key has one of two rule types:
    - **`values`** — the submitted value must be one of a fixed list of strings.
    - **`regex`** — the submitted value must fully match a regular expression.
-4. If all keys and values pass, the validator returns `200 OK`; otherwise it
+     Patterns are pre-compiled at startup and cached; a value that exceeds the
+     size limit is never sent to the regex engine, bounding ReDoS exposure.
+   - **`required`** — an optional boolean that, when set to `YES`, causes
+     `validateParams:` to reject requests that omit the field entirely.
+8. If all keys and values pass, the validator returns `200 OK`; otherwise it
    returns `403 Forbidden`.  Any key not present in the allowlist is rejected.
+9. Every detected attack attempt (unknown key, oversized parameter, path
+   injection, bad Content-Type, slow POST, unsupported method) is logged with
+   `syslog(3)` to facility `LOG_AUTH` at `LOG_WARNING`, including the client
+   IP address.  Log messages can be forwarded to a remote syslog collector
+   via `/etc/syslog.conf`.
+10. Every response includes security headers: `X-Content-Type-Options: nosniff`,
+    `Cache-Control: no-store`, and `X-Frame-Options: DENY`.
 
 ## Repository layout
 
 ```
 src/
-  RequestValidator.h   — class interface
-  RequestValidator.m   — URL-decode, form-parse, and validate logic
-  main.m               — CGI entry point (reads env/stdin, calls validator)
+  RequestValidator.h   — class interface (constants, rule format, method docs)
+  RequestValidator.m   — URL-decode, form-parse, validate, regex cache logic
+  main.m               — CGI entry point (syslog, path check, alarm, pledge/unveil)
+  OVERVIEW.md          — detailed per-symbol documentation
 config/
   allowlist.plist.example   — annotated allowlist template
   httpd.conf.example        — OpenBSD httpd server block (three locations)
   relayd.conf.example       — relayd TLS relay forwarding to httpd
 tests/
   test_validator.m          — standalone test runner (no XCTest required)
+  README.md                 — per-test-group documentation
   fixtures/
     test_allowlist.plist    — plist used by the test suite
 Makefile
@@ -67,7 +95,7 @@ Expected output (all tests passing):
 PASS: urldecode: '+' becomes space
 PASS: urldecode: %69 → 'i'
 ...
-20 passed, 0 failed
+39 passed, 0 failed
 ```
 
 ## Cleaning
@@ -94,6 +122,8 @@ Copy `config/allowlist.plist.example` to
             <string>login</string>
             <string>logout</string>
         </array>
+        <!-- optional: reject submissions that omit this field -->
+        <key>required</key> <true/>
     </dict>
 
     <!-- regex rule (entire value must match) -->
@@ -109,10 +139,34 @@ Copy `config/allowlist.plist.example` to
 
 | Variable           | Default                              | Description                        |
 |--------------------|--------------------------------------|------------------------------------|
-| `ALLOWLIST_CONFIG` | `/etc/cgi-allowlist/allowlist.plist` | Path to the allowlist plist file.  |
+| `ALLOWLIST_CONFIG` | `/etc/cgi-allowlist/allowlist.plist` | Path to the allowlist plist file.  Must be absolute, under `/etc/cgi-allowlist/`, and contain no `..` components. |
 
 Set this per-location inside `httpd.conf` using `fastcgi { param … }` so each
 endpoint loads its own ruleset (see `config/httpd.conf.example`).
+
+### Remote syslog forwarding
+
+All attack-event log lines are written to `syslog` facility `LOG_AUTH`.  To
+forward them to a remote syslog collector, add a rule to `/etc/syslog.conf`:
+
+```
+auth.warning    @logs.example.com
+```
+
+Then reload syslogd:
+
+```sh
+rcctl reload syslogd
+```
+
+Each log line includes the client IP address (`client=<REMOTE_ADDR>`) and a
+human-readable description of the rejection, for example:
+
+```
+request_validator[1234]: client=203.0.113.5 request rejected by allowlist: unknown parameter key 'evil'
+request_validator[1235]: client=203.0.113.5 POST with unexpected or missing Content-Type: 'text/html'
+request_validator[1236]: client=203.0.113.5 path injection attempt via ALLOWLIST_CONFIG='/etc/passwd'
+```
 
 ## Installing
 
@@ -190,6 +244,21 @@ submitted value (anchoring with `^` and `$` is required):
 </dict>
 ```
 
+**`required` — make a field mandatory**
+
+Add `<key>required</key> <true/>` to any rule to reject requests that do not
+include that field at all:
+
+```xml
+<key>action</key>
+<dict>
+    <key>type</key>    <string>values</string>
+    <key>allowed</key>
+    <array><string>submit</string></array>
+    <key>required</key> <true/>
+</dict>
+```
+
 > **Important:** every field your HTML form can submit must have an entry in
 > the plist.  Any key not listed is automatically rejected with 403 Forbidden.
 
@@ -222,6 +291,7 @@ Test a valid submission (should return `200 OK`):
 ```sh
 curl -s -o /dev/null -w "%{http_code}" \
      -X POST https://example.com/contact \
+     -H "Content-Type: application/x-www-form-urlencoded" \
      -d "subject=sales&email=user@example.com&message=Hello"
 # → 200
 ```
@@ -232,6 +302,7 @@ Test a rejected submission — unexpected key or bad value (should return
 ```sh
 curl -s -o /dev/null -w "%{http_code}" \
      -X POST https://example.com/contact \
+     -H "Content-Type: application/x-www-form-urlencoded" \
      -d "subject=sales&evil=<script>alert(1)</script>"
 # → 403
 ```
