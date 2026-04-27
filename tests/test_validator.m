@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 #import "../src/RequestValidator.h"
+#include "../src/security_headers.h"
+#include <string.h>
 
 /* ── Minimal test framework ────────────────────────────────────────────── */
 
@@ -345,6 +347,39 @@ static void testRejectionReasonPropagation(void)
     ASSERT("rejection reason: bad value sets reason", !r2 && reason != nil);
 }
 
+/* ── Security header tests ─────────────────────────────────────────────── */
+
+/*
+ * Verify that SECURITY_HEADERS_BLOCK contains every OWASP-required header
+ * line.  This test checks the single compile-time constant used by both
+ * respond() and alarm_handler() so the two code paths can never diverge.
+ */
+static void testSecurityHeaders(void)
+{
+    const char *block = SECURITY_HEADERS_BLOCK;
+
+    ASSERT("security headers: X-Content-Type-Options: nosniff",
+           strstr(block, "X-Content-Type-Options: nosniff") != NULL);
+    ASSERT("security headers: Cache-Control: no-store",
+           strstr(block, "Cache-Control: no-store") != NULL);
+    ASSERT("security headers: X-Frame-Options: DENY",
+           strstr(block, "X-Frame-Options: DENY") != NULL);
+    ASSERT("security headers: Content-Security-Policy: default-src 'none'",
+           strstr(block, "Content-Security-Policy: default-src 'none'") != NULL);
+    ASSERT("security headers: Strict-Transport-Security max-age present",
+           strstr(block, "Strict-Transport-Security: max-age=") != NULL);
+    ASSERT("security headers: Referrer-Policy: no-referrer",
+           strstr(block, "Referrer-Policy: no-referrer") != NULL);
+    ASSERT("security headers: Permissions-Policy present",
+           strstr(block, "Permissions-Policy:") != NULL);
+    ASSERT("security headers: Cross-Origin-Opener-Policy: same-origin",
+           strstr(block, "Cross-Origin-Opener-Policy: same-origin") != NULL);
+    ASSERT("security headers: Cross-Origin-Resource-Policy: same-origin",
+           strstr(block, "Cross-Origin-Resource-Policy: same-origin") != NULL);
+    ASSERT("security headers: X-Permitted-Cross-Domain-Policies: none",
+           strstr(block, "X-Permitted-Cross-Domain-Policies: none") != NULL);
+}
+
 /* ── Entry point ───────────────────────────────────────────────────────── */
 
 int main(int argc, const char *argv[])
@@ -365,6 +400,7 @@ int main(int argc, const char *argv[])
     testValueLengthLimit();
     testRequiredField();
     testRejectionReasonPropagation();
+    testSecurityHeaders();
 
     fprintf(stdout, "\n%d passed, %d failed\n", g_passed, g_failed);
 

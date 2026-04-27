@@ -101,11 +101,28 @@ Tests that `validateParams:rejectionReason:` always populates `*outReason` on fa
 - An unknown key (`evil=x`) sets `rejectionReason`
 - A bad value for a known key (`action=HACK`) sets `rejectionReason`
 
+### 15. `testSecurityHeaders`
+Verifies that `SECURITY_HEADERS_BLOCK` (the single compile-time constant used by both
+`respond()` and `alarm_handler()`) contains every OWASP-required header line:
+- `X-Content-Type-Options: nosniff`
+- `Cache-Control: no-store`
+- `X-Frame-Options: DENY`
+- `Content-Security-Policy: default-src 'none'`
+- `Strict-Transport-Security: max-age=...` (HSTS, 2-year max-age)
+- `Referrer-Policy: no-referrer`
+- `Permissions-Policy:` (all sensitive browser features disabled)
+- `Cross-Origin-Opener-Policy: same-origin`
+- `Cross-Origin-Resource-Policy: same-origin`
+- `X-Permitted-Cross-Domain-Policies: none`
+
+Each assertion uses `strstr` on the constant, so the test catches a missing or misspelled
+header without requiring the CGI binary to be executed.
+
 ---
 
 ## Entry Point
 
-`main()` runs all 14 test groups in sequence, then prints a summary (`X passed, Y failed`) and exits with code `1` if any test failed, `0` otherwise.
+`main()` runs all 15 test groups in sequence, then prints a summary (`X passed, Y failed`) and exits with code `1` if any test failed, `0` otherwise.
 
 ---
 

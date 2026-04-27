@@ -73,6 +73,12 @@ Returns `YES` only when both passes succeed. An empty `params` dictionary passes
 
 ---
 
+## `security_headers.h` — OWASP Security Headers
+
+Defines a single compile-time string macro, `SECURITY_HEADERS_BLOCK`, containing all ten OWASP-recommended HTTP security response headers as `\r\n`-terminated lines. Both `respond()` and the `alarm_handler()` static response string use this macro so the two code paths share one authoritative definition and can never diverge. `tests/test_validator.m` includes this header to assert that every required header line is present.
+
+---
+
 ## `main.m` — CGI Entry Point
 
 This is a **CGI binary**. It reads the HTTP request from the environment and stdin (as `httpd`/`slowcgi` set them up), hardens the request, and validates the parameters.
@@ -94,13 +100,24 @@ This is a **CGI binary**. It reads the HTTP request from the environment and std
 A `printf`-style wrapper around `syslog(3)`. Prepends `client=<REMOTE_ADDR>` to every message. Called for every detected attack event (unknown/oversized parameters, path injection, bad Content-Type, slow POST, unsupported method, allowlist rejection) using `LOG_WARNING`, and for internal failures using `LOG_ERR`. Messages are emitted to `syslog` facility `LOG_AUTH` and can be forwarded to a remote syslog collector via `/etc/syslog.conf`.
 
 ### `respond()` (static helper)
-Writes a CGI-formatted HTTP response to stdout: `Status:`, `Content-Type: text/plain`, and three security headers on every response:
-- `X-Content-Type-Options: nosniff`
-- `Cache-Control: no-store`
-- `X-Frame-Options: DENY`
+Writes a CGI-formatted HTTP response to stdout: `Status:`, `Content-Type: text/plain`, and ten
+security headers drawn from `SECURITY_HEADERS_BLOCK` (see `security_headers.h`):
+
+| Header | Value |
+|---|---|
+| `X-Content-Type-Options` | `nosniff` |
+| `Cache-Control` | `no-store` |
+| `X-Frame-Options` | `DENY` |
+| `Content-Security-Policy` | `default-src 'none'` |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` |
+| `Referrer-Policy` | `no-referrer` |
+| `Permissions-Policy` | *(all sensitive features disabled)* |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Cross-Origin-Resource-Policy` | `same-origin` |
+| `X-Permitted-Cross-Domain-Policies` | `none` |
 
 ### `alarm_handler()` (SIGALRM handler)
-Called when `SIGALRM` fires after `POST_READ_TIMEOUT_SECS` seconds of waiting for stdin. Uses only async-signal-safe functions: reads `g_remote_addr` (pre-populated static buffer), calls `syslog(3)` directly, writes a hardcoded 408 CGI response to `STDOUT_FILENO` with `write(2)`, then calls `_exit(1)`.
+Called when `SIGALRM` fires after `POST_READ_TIMEOUT_SECS` seconds of waiting for stdin. Uses only async-signal-safe functions: reads `g_remote_addr` (pre-populated static buffer), calls `syslog(3)` directly, writes a hardcoded 408 CGI response to `STDOUT_FILENO` with `write(2)`, then calls `_exit(1)`. The response includes the same ten security headers via `SECURITY_HEADERS_BLOCK` — the macro is concatenated into the static string at compile time so `respond()` and `alarm_handler()` can never diverge.
 
 ### `isConfigPathSafe()` (static helper)
 Returns 1 only when a config path:

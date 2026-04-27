@@ -7,6 +7,8 @@
 #include <syslog.h>
 #include <unistd.h>
 
+#include "security_headers.h"
+
 /* Maximum accepted POST body size (1 MB). */
 #define MAX_BODY_SIZE (1024L * 1024L)
 
@@ -69,9 +71,7 @@ static void respond(int status, const char *statusText, const char *body)
 {
     printf("Status: %d %s\r\n", status, statusText);
     printf("Content-Type: text/plain\r\n");
-    printf("X-Content-Type-Options: nosniff\r\n");
-    printf("Cache-Control: no-store\r\n");
-    printf("X-Frame-Options: DENY\r\n");
+    fputs(SECURITY_HEADERS_BLOCK, stdout);
     printf("\r\n");
     printf("%s\n", body);
     fflush(stdout);
@@ -92,9 +92,7 @@ static void alarm_handler(int sig)
     static const char response[] =
         "Status: 408 Request Timeout\r\n"
         "Content-Type: text/plain\r\n"
-        "X-Content-Type-Options: nosniff\r\n"
-        "Cache-Control: no-store\r\n"
-        "X-Frame-Options: DENY\r\n"
+        SECURITY_HEADERS_BLOCK
         "\r\n"
         "Request Timeout\n";
     {
