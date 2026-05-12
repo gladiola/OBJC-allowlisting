@@ -17,8 +17,10 @@ behind an optional `relayd(8)` TLS relay.
 4. The validator checks the `ALLOWLIST_CONFIG` environment variable.  If set,
    it must point inside `/etc/cgi-allowlist/` and must not contain `..`;
    violations are rejected with 400 and logged.
-5. POST requests must declare `Content-Type: application/x-www-form-urlencoded`
-   or the request is rejected with 415 and logged.  A 30-second alarm timer
+5. POST requests must declare media type
+   `application/x-www-form-urlencoded` (exactly, case-insensitive), with only
+   syntactically valid optional parameters (for example `; charset=UTF-8`), or
+   the request is rejected with 415 and logged.  A 30-second alarm timer
    ensures a slow or stalled POST client cannot tie up the process indefinitely.
 6. The raw body (POST) or query string (GET) is parsed into `key=value` pairs.
    Requests exceeding any of the following hard limits are rejected with 400
@@ -37,10 +39,12 @@ behind an optional `relayd(8)` TLS relay.
 8. If all keys and values pass, the validator returns `200 OK`; otherwise it
    returns `403 Forbidden`.  Any key not present in the allowlist is rejected.
 9. Every detected attack attempt (unknown key, oversized parameter, path
-   injection, bad Content-Type, slow POST, unsupported method) is logged with
-   `syslog(3)` to facility `LOG_AUTH` at `LOG_WARNING`, including the client
-   IP address.  Log messages can be forwarded to a remote syslog collector
-   via `/etc/syslog.conf`.
+   injection, bad Content-Type, slow POST, unsupported method) is logged,
+   including the client IP address.  Standard request-path events use
+   `syslog(3)` to facility `LOG_AUTH` at `LOG_WARNING`; the timeout signal path
+   emits a fixed, prebuilt line via async-signal-safe `write(2)` to stderr.
+   Log-bound text is control-character-sanitized before emission.  Syslog
+   messages can be forwarded to a remote collector via `/etc/syslog.conf`.
 10. Every response includes security headers: `X-Content-Type-Options: nosniff`,
      `Cache-Control: no-store`, and `X-Frame-Options: DENY`.
 
@@ -83,6 +87,16 @@ behind an optional `relayd(8)` TLS relay.
 
 - Security posture is generally strong for an allowlisting gate, especially with bounded parsing and OpenBSD hardening hooks.
 - Final confidence should include running the full test suite in a GNUstep-capable environment and adding regression tests for the findings above once fixed.
+
+### Follow-up security review (post-remediation, 2026-05-12)
+
+| Severity | Original finding | Remediation status | Updated behavior |
+|---|---|---|---|
+| Medium | Prefix-based POST `Content-Type` check accepted type-like prefixes. | Fixed | Parser now requires exact media type `application/x-www-form-urlencoded` with optional syntactically valid parameters only. |
+| Medium | `SIGALRM` handler called `syslog()`, which is not async-signal-safe. | Fixed | Signal handler now uses only async-signal-safe operations (`write(2)`, `_exit(1)`) and emits a prebuilt timeout log line to stderr. |
+| Low | User-controlled rejection strings could inject control characters into logs. | Fixed | Central logging path now sanitizes control characters from log-bound text before emission. |
+
+Follow-up conclusion: all findings from the 2026-05-12 review are remediated in code, with no remaining open items from that review.
 
 ## Repository layout
 
