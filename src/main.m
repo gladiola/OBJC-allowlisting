@@ -154,10 +154,16 @@ static int runValidator(void)
                          "\r\n"
                          "%s\n",
                          ls->request_timeout);
-        g_timeout_response_len =
-            (n > 0 && (size_t)n < sizeof(g_timeout_response))
-                ? (size_t)n
-                : sizeof(g_timeout_response) - 1;
+        if (n < 0) {
+            /* snprintf error: signal handler will write an empty response. */
+            g_timeout_response_len = 0;
+        } else if ((size_t)n >= sizeof(g_timeout_response)) {
+            /* Buffer was too small; snprintf truncated the output. Write as
+             * much as fits (the NUL at position sizeof-1 is not written). */
+            g_timeout_response_len = sizeof(g_timeout_response) - 1;
+        } else {
+            g_timeout_response_len = (size_t)n;
+        }
     }
 
     const char *method = getenv("REQUEST_METHOD");
