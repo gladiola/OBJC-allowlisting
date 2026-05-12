@@ -51,6 +51,8 @@ src/
   RequestValidator.h   — class interface (constants, rule format, method docs)
   RequestValidator.m   — URL-decode, form-parse, validate, regex cache logic
   main.m               — CGI entry point (syslog, path check, alarm, pledge/unveil)
+  i18n.h               — LocalizedStrings struct and get_localized_strings() declaration
+  i18n.c               — 38-language translation table and Accept-Language detection
   OVERVIEW.md          — detailed per-symbol documentation
 config/
   allowlist.plist.example   — annotated allowlist template
@@ -79,9 +81,67 @@ pkg_add gnustep-make gnustep-base libobjc2
 make
 ```
 
-This compiles `src/main.m` and `src/RequestValidator.m` using `cc` with the
-GNUstep and libobjc2 flags and produces the `request_validator` executable in
-the repository root.
+This compiles `src/main.m`, `src/RequestValidator.m`, and `src/i18n.c` using
+`cc` with the GNUstep and libobjc2 flags and produces the `request_validator`
+executable in the repository root.
+
+## Multilingual support
+
+All user-facing response bodies (status messages, error descriptions) are
+delivered in the language that best matches the browser's `Accept-Language`
+request header.  Thirty-eight languages are supported out of the box:
+
+| Language tag(s) | Language |
+|---|---|
+| `en` | US English (default / fallback) |
+| `de` | German |
+| `es` | Spanish |
+| `fr` | French |
+| `pt` | Portuguese |
+| `it` | Italian |
+| `zh-HK`, `zh-TW`, `zh-MO` | Hong Kong / Traditional Chinese |
+| `zh`, `zh-CN`, `zh-SG` | Mandarin / Simplified Chinese |
+| `ko` | Korean |
+| `hi` | Hindi |
+| `ru` | Russian |
+| `ar` | Arabic |
+| `sw` | Swahili |
+| `ja` | Japanese |
+| `ht` | Haitian Creole |
+| `haw` | Hawaiian |
+| `sm` | Samoan |
+| `mi` | Māori |
+| `af` | Afrikaans |
+| `nl` | Dutch |
+| `ha` | Hausa |
+| `am` | Amharic |
+| `yo` | Yoruba |
+| `bn` | Bengali |
+| `et` | Estonian |
+| `fi` | Finnish |
+| `sv` | Swedish |
+| `no`, `nb`, `nn` | Norwegian |
+| `uk` | Ukrainian |
+| `th` | Thai |
+| `id` | Bahasa Indonesia |
+| `tl` | Tagalog |
+| `ms` | Malay |
+| `jv` | Javanese |
+| `el` | Greek |
+| `la` | Latin |
+| `he` | Hebrew |
+| `ga` | Irish |
+
+Language detection is handled by `src/i18n.c`.  It reads the
+`HTTP_ACCEPT_LANGUAGE` CGI environment variable (the browser's
+`Accept-Language` header), works through each comma-separated language
+range in preference order, and returns the first match.  Both full tags
+(`zh-HK`) and primary subtags (`zh`) are tried for each range, so region
+variants fall back gracefully to the base language.  US English is used when
+no language matches or the header is absent.
+
+All responses are sent with `Content-Type: text/plain; charset=utf-8` to
+ensure correct rendering of non-ASCII characters in every supported locale.
 
 ## Running the tests
 
