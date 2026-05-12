@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import "RequestValidator.h"
 
+#include <ctype.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <string.h>
@@ -45,6 +46,8 @@ static char g_remote_addr[64] = "unknown";
  */
 static char   g_timeout_response[1024];
 static size_t g_timeout_response_len;
+static char   g_timeout_log_line[256];
+static size_t g_timeout_log_line_len;
 
 static void cache_remote_addr(void)
 {
@@ -64,15 +67,36 @@ static void cache_remote_addr(void)
 static void security_log(int priority, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
+static void sanitize_for_syslog(const char *input, char *output, size_t outputSize)
+{
+    size_t i, j = 0;
+
+    if (outputSize == 0) return;
+    if (!input) {
+        snprintf(output, outputSize, "(null)");
+        return;
+    }
+
+    for (i = 0; input[i] != '\0' && j + 1 < outputSize; i++) {
+        unsigned char c = (unsigned char)input[i];
+        if (c < 0x20 || c == 0x7f)
+            output[j++] = '?';
+        else
+            output[j++] = (char)c;
+    }
+    output[j] = '\0';
+}
+
 static void security_log(int priority, const char *fmt, ...)
 {
-    char msg[512];
+    char msg[512], sanitized[512];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
+    sanitize_for_syslog(msg, sanitized, sizeof(sanitized));
 
-    syslog(priority, "client=%s %s", g_remote_addr, msg);
+    syslog(priority, "client=%s %s", g_remote_addr, sanitized);
 }
 
 /* ── CGI response helpers ──────────────────────────────────────────────── */
@@ -97,7 +121,11 @@ static void respond(int status, const char *statusText, const char *body)
 static void alarm_handler(int sig)
 {
     (void)sig;
-    syslog(LOG_WARNING, "client=%s slow POST timeout, aborting", g_remote_addr);
+    if (g_timeout_log_line_len > 0) {
+        ssize_t logN = write(STDERR_FILENO, g_timeout_log_line,
+                             g_timeout_log_line_len);
+        (void)logN; /* best-effort in a signal handler */
+    }
     /* Write the pre-built localized CGI response (populated before arming the
      * alarm).  Only async-signal-safe functions are used here. */
     {
@@ -134,6 +162,88 @@ static int isConfigPathSafe(const char *path)
     return 1;
 }
 
+static int is_http_token_char(unsigned char c)
+{
+    return (isalnum(c) || c == '!' || c == '#' || c == '$' || c == '%' ||
+            c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' ||
+            c == '.' || c == '^' || c == '_' || c == '`' || c == '|' ||
+            c == '~');
+}
+
+/*
+ * Accept exactly application/x-www-form-urlencoded with optional parameters.
+ * Examples accepted:
+ *   application/x-www-form-urlencoded
+ *   application/x-www-form-urlencoded; charset=UTF-8
+ */
+static int is_form_urlencoded_content_type(const char *contentType)
+{
+    static const char expected[] = "application/x-www-form-urlencoded";
+    const char *p;
+
+    if (!contentType) return 0;
+    p = contentType;
+
+    while (*p == ' ' || *p == '\t') p++;
+
+    if (strncasecmp(p, expected, sizeof(expected) - 1) != 0)
+        return 0;
+    p += sizeof(expected) - 1;
+
+    if (*p != '\0' && *p != ';' && *p != ' ' && *p != '\t')
+        return 0;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0') return 1;
+
+    while (*p == ';') {
+        const char *tokStart;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') return 0;
+
+        tokStart = p;
+        while (*p && is_http_token_char((unsigned char)*p)) p++;
+        if (p == tokStart) return 0;
+
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '=') return 0;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+
+        if (*p == '"') {
+            p++;
+            while (*p) {
+                unsigned char c = (unsigned char)*p;
+                if (c == '\\') {
+                    p++;
+                    if (*p == '\0') return 0;
+                    p++;
+                    continue;
+                }
+                if (c == '"') {
+                    p++;
+                    break;
+                }
+                if ((c < 0x20 && c != '\t') || c == 0x7f)
+                    return 0;
+                p++;
+            }
+            if (*(p - 1) != '"') return 0;
+        } else {
+            tokStart = p;
+            while (*p && is_http_token_char((unsigned char)*p)) p++;
+            if (p == tokStart) return 0;
+        }
+
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') return 1;
+        if (*p != ';') return 0;
+    }
+
+    return 0;
+}
+
 /* ── Core validator logic (returns 0 on success, 1 on rejection/error) ─── */
 
 static int runValidator(void)
@@ -163,6 +273,18 @@ static int runValidator(void)
             g_timeout_response_len = sizeof(g_timeout_response) - 1;
         } else {
             g_timeout_response_len = (size_t)n;
+        }
+    }
+    {
+        int n = snprintf(g_timeout_log_line, sizeof(g_timeout_log_line),
+                         "request_validator: client=%s slow POST timeout, aborting\n",
+                         g_remote_addr);
+        if (n < 0) {
+            g_timeout_log_line_len = 0;
+        } else if ((size_t)n >= sizeof(g_timeout_log_line)) {
+            g_timeout_log_line_len = sizeof(g_timeout_log_line) - 1;
+        } else {
+            g_timeout_log_line_len = (size_t)n;
         }
     }
 
@@ -211,9 +333,7 @@ static int runValidator(void)
     if (strcasecmp(method, "POST") == 0) {
         /* ── Verify Content-Type ── */
         const char *ct = getenv("CONTENT_TYPE");
-        if (!ct ||
-            strncasecmp(ct, "application/x-www-form-urlencoded",
-                        sizeof("application/x-www-form-urlencoded") - 1) != 0) {
+        if (!is_form_urlencoded_content_type(ct)) {
             security_log(LOG_WARNING,
                          "POST with unexpected or missing Content-Type: '%.128s'",
                          ct ? ct : "(none)");

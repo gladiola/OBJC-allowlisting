@@ -97,7 +97,7 @@ This is a **CGI binary**. It reads the HTTP request from the environment and std
 `g_remote_addr` is a static 64-byte buffer initialised to `"unknown"`. `cache_remote_addr()` copies `REMOTE_ADDR` into it at the start of every request. The buffer is used by both `security_log()` and `alarm_handler()` so that REMOTE_ADDR is available to the signal handler without calling the non-async-signal-safe `getenv()`.
 
 ### `security_log()` (static helper)
-A `printf`-style wrapper around `syslog(3)`. Prepends `client=<REMOTE_ADDR>` to every message. Called for every detected attack event (unknown/oversized parameters, path injection, bad Content-Type, slow POST, unsupported method, allowlist rejection) using `LOG_WARNING`, and for internal failures using `LOG_ERR`. Messages are emitted to `syslog` facility `LOG_AUTH` and can be forwarded to a remote syslog collector via `/etc/syslog.conf`.
+A `printf`-style wrapper around `syslog(3)`. Prepends `client=<REMOTE_ADDR>` to every message and sanitizes control characters from formatted log text before emission (preventing multiline/control-character log injection from user-derived values). Called for detected attack events and internal failures in the normal request path. Messages are emitted to `syslog` facility `LOG_AUTH` and can be forwarded to a remote syslog collector via `/etc/syslog.conf`.
 
 ### `respond()` (static helper)
 Writes a CGI-formatted HTTP response to stdout: `Status:`,
@@ -122,10 +122,10 @@ any of the 38 supported languages:
 ### `alarm_handler()` (SIGALRM handler)
 Called when `SIGALRM` fires after `POST_READ_TIMEOUT_SECS` seconds of waiting
 for stdin.  Uses only async-signal-safe functions: reads `g_remote_addr`
-(pre-populated static buffer) and `g_timeout_response` (the pre-built
-localized 408 response, also populated before the alarm is armed), calls
-`syslog(3)`, writes the pre-built response to `STDOUT_FILENO` with `write(2)`,
-then calls `_exit(1)`.  The response buffer includes the ten OWASP security
+(pre-populated static buffer), writes a pre-built timeout log line to
+`STDERR_FILENO`, writes the pre-built localized 408 response to
+`STDOUT_FILENO` with `write(2)`, then calls `_exit(1)`.  The response buffer
+includes the ten OWASP security
 headers via `SECURITY_HEADERS_BLOCK`, so `respond()` and `alarm_handler()`
 can never diverge.
 
@@ -143,7 +143,7 @@ Returns 1 only when a config path:
 4. **Validates `ALLOWLIST_CONFIG`**: if the env var is set but fails `isConfigPathSafe()`, logs the path injection attempt and returns 400.
 5. **OpenBSD hardening** (`#ifdef __OpenBSD__`): calls `unveil(2)` to restrict filesystem access to `SAFE_CONFIG_DIR`, then `pledge(2)` to `"stdio rpath"`. Failure is fatal (500).
 6. **POST path**:
-   - Rejects requests without `Content-Type: application/x-www-form-urlencoded` (415, logged).
+   - Requires exact media type `application/x-www-form-urlencoded` (case-insensitive), allowing only syntactically valid optional parameters (415 + log on failure).
    - Validates `CONTENT_LENGTH` (must be 0–`MAX_BODY_SIZE`; invalid values logged and rejected with 400).
    - Arms `SIGALRM` / `alarm_handler` before reading stdin; disarms it immediately after.
    - Decodes the body as UTF-8 (rejects non-UTF-8 with 400).
