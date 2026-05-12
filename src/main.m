@@ -7,6 +7,7 @@
 #include <syslog.h>
 #include <unistd.h>
 
+#include "i18n.h"
 #include "security_headers.h"
 
 /* Maximum accepted POST body size (1 MB). */
@@ -35,6 +36,15 @@
  * call async-signal-safe functions) can read it without calling getenv().
  */
 static char g_remote_addr[64] = "unknown";
+
+/*
+ * Pre-built 408 response for the SIGALRM handler.
+ * Populated in runValidator() before the alarm is armed, using the locale
+ * detected from HTTP_ACCEPT_LANGUAGE.  The signal handler writes this buffer
+ * with write(2), which is async-signal-safe.
+ */
+static char   g_timeout_response[1024];
+static size_t g_timeout_response_len;
 
 static void cache_remote_addr(void)
 {
@@ -70,7 +80,7 @@ static void security_log(int priority, const char *fmt, ...)
 static void respond(int status, const char *statusText, const char *body)
 {
     printf("Status: %d %s\r\n", status, statusText);
-    printf("Content-Type: text/plain\r\n");
+    printf("Content-Type: text/plain; charset=utf-8\r\n");
     fputs(SECURITY_HEADERS_BLOCK, stdout);
     printf("\r\n");
     printf("%s\n", body);
@@ -88,15 +98,11 @@ static void alarm_handler(int sig)
 {
     (void)sig;
     syslog(LOG_WARNING, "client=%s slow POST timeout, aborting", g_remote_addr);
-    /* Write a minimal CGI response without printf (not async-signal-safe). */
-    static const char response[] =
-        "Status: 408 Request Timeout\r\n"
-        "Content-Type: text/plain\r\n"
-        SECURITY_HEADERS_BLOCK
-        "\r\n"
-        "Request Timeout\n";
+    /* Write the pre-built localized CGI response (populated before arming the
+     * alarm).  Only async-signal-safe functions are used here. */
     {
-        ssize_t n = write(STDOUT_FILENO, response, sizeof(response) - 1);
+        ssize_t n = write(STDOUT_FILENO, g_timeout_response,
+                          g_timeout_response_len);
         (void)n; /* best-effort in a signal handler; nothing to do on error */
     }
     _exit(1);
@@ -135,9 +141,34 @@ static int runValidator(void)
     openlog("request_validator", LOG_PID | LOG_NDELAY, LOG_AUTH);
     cache_remote_addr(); /* populate g_remote_addr for use in signal handler */
 
+    /* ── Detect locale from the Accept-Language request header ── */
+    const LocalizedStrings *ls =
+        get_localized_strings(getenv("HTTP_ACCEPT_LANGUAGE"));
+
+    /* ── Pre-build the localized 408 response for the SIGALRM handler ── */
+    {
+        int n = snprintf(g_timeout_response, sizeof(g_timeout_response),
+                         "Status: 408 Request Timeout\r\n"
+                         "Content-Type: text/plain; charset=utf-8\r\n"
+                         SECURITY_HEADERS_BLOCK
+                         "\r\n"
+                         "%s\n",
+                         ls->request_timeout);
+        if (n < 0) {
+            /* snprintf error: signal handler will write an empty response. */
+            g_timeout_response_len = 0;
+        } else if ((size_t)n >= sizeof(g_timeout_response)) {
+            /* Buffer was too small; snprintf truncated the output. Write as
+             * much as fits (the NUL at position sizeof-1 is not written). */
+            g_timeout_response_len = sizeof(g_timeout_response) - 1;
+        } else {
+            g_timeout_response_len = (size_t)n;
+        }
+    }
+
     const char *method = getenv("REQUEST_METHOD");
     if (!method) {
-        respond(400, "Bad Request", "Missing REQUEST_METHOD");
+        respond(400, "Bad Request", ls->missing_request_method);
         return 1;
     }
 
@@ -146,7 +177,7 @@ static int runValidator(void)
     if (cfgC && !isConfigPathSafe(cfgC)) {
         security_log(LOG_WARNING,
                      "path injection attempt via ALLOWLIST_CONFIG='%.256s'", cfgC);
-        respond(400, "Bad Request", "Invalid configuration path");
+        respond(400, "Bad Request", ls->invalid_config_path);
         return 1;
     }
     /*
@@ -165,12 +196,12 @@ static int runValidator(void)
      */
     if (unveil(SAFE_CONFIG_DIR, "r") == -1 || unveil(NULL, NULL) == -1) {
         security_log(LOG_ERR, "unveil failed");
-        respond(500, "Internal Server Error", "Internal Server Error");
+        respond(500, "Internal Server Error", ls->internal_server_error);
         return 1;
     }
     if (pledge("stdio rpath", NULL) == -1) {
         security_log(LOG_ERR, "pledge failed");
-        respond(500, "Internal Server Error", "Internal Server Error");
+        respond(500, "Internal Server Error", ls->internal_server_error);
         return 1;
     }
 #endif
@@ -186,15 +217,14 @@ static int runValidator(void)
             security_log(LOG_WARNING,
                          "POST with unexpected or missing Content-Type: '%.128s'",
                          ct ? ct : "(none)");
-            respond(415, "Unsupported Media Type",
-                    "Content-Type must be application/x-www-form-urlencoded");
+            respond(415, "Unsupported Media Type", ls->invalid_content_type);
             return 1;
         }
 
         /* ── Read body from stdin up to CONTENT_LENGTH bytes ── */
         const char *clStr = getenv("CONTENT_LENGTH");
         if (!clStr) {
-            respond(400, "Bad Request", "Missing CONTENT_LENGTH");
+            respond(400, "Bad Request", ls->missing_content_length);
             return 1;
         }
 
@@ -203,7 +233,7 @@ static int runValidator(void)
         if (endPtr == clStr || cl < 0 || cl > MAX_BODY_SIZE) {
             security_log(LOG_WARNING,
                          "invalid CONTENT_LENGTH value: '%.64s'", clStr);
-            respond(400, "Bad Request", "Invalid CONTENT_LENGTH");
+            respond(400, "Bad Request", ls->invalid_content_length);
             return 1;
         }
 
@@ -220,7 +250,7 @@ static int runValidator(void)
         body = [[[NSString alloc] initWithData:data
                                       encoding:NSUTF8StringEncoding] autorelease];
         if (!body) {
-            respond(400, "Bad Request", "Request body is not valid UTF-8");
+            respond(400, "Bad Request", ls->body_not_utf8);
             return 1;
         }
 
@@ -231,7 +261,7 @@ static int runValidator(void)
 
     } else {
         security_log(LOG_WARNING, "unsupported HTTP method: '%.32s'", method);
-        respond(405, "Method Not Allowed", "Only GET and POST are supported");
+        respond(405, "Method Not Allowed", ls->method_not_allowed);
         return 1;
     }
 
@@ -240,8 +270,7 @@ static int runValidator(void)
                                        initWithAllowlistPath:configPath] autorelease];
     if (!validator) {
         security_log(LOG_ERR, "failed to load allowlist config");
-        respond(500, "Internal Server Error",
-                "Failed to load allowlist configuration");
+        respond(500, "Internal Server Error", ls->allowlist_load_failed);
         return 1;
     }
 
@@ -252,19 +281,19 @@ static int runValidator(void)
     if (!params) {
         security_log(LOG_WARNING, "request rejected during parsing: %s",
                      [rejectionReason UTF8String]);
-        respond(400, "Bad Request", "Request exceeds size limits");
+        respond(400, "Bad Request", ls->request_too_large);
         return 1;
     }
 
     /* ── Validate against the allowlist ── */
     if ([validator validateParams:params rejectionReason:&rejectionReason]) {
-        respond(200, "OK", "OK");
+        respond(200, "OK", ls->ok);
         return 0;
     }
 
     security_log(LOG_WARNING, "request rejected by allowlist: %s",
                  [rejectionReason UTF8String]);
-    respond(403, "Forbidden", "403 Forbidden");
+    respond(403, "Forbidden", ls->forbidden);
     return 1;
 }
 

@@ -5,7 +5,7 @@ CFLAGS  = $(shell gnustep-config --objc-flags) -Isrc
 LDFLAGS = $(shell gnustep-config --base-libs)
 
 TARGET      = request_validator
-SRCS        = src/main.m src/RequestValidator.m
+SRCS        = src/main.m src/RequestValidator.m src/i18n.c
 
 TEST_TARGET = test_validator
 TEST_SRCS   = tests/test_validator.m src/RequestValidator.m

@@ -100,8 +100,11 @@ This is a **CGI binary**. It reads the HTTP request from the environment and std
 A `printf`-style wrapper around `syslog(3)`. Prepends `client=<REMOTE_ADDR>` to every message. Called for every detected attack event (unknown/oversized parameters, path injection, bad Content-Type, slow POST, unsupported method, allowlist rejection) using `LOG_WARNING`, and for internal failures using `LOG_ERR`. Messages are emitted to `syslog` facility `LOG_AUTH` and can be forwarded to a remote syslog collector via `/etc/syslog.conf`.
 
 ### `respond()` (static helper)
-Writes a CGI-formatted HTTP response to stdout: `Status:`, `Content-Type: text/plain`, and ten
-security headers drawn from `SECURITY_HEADERS_BLOCK` (see `security_headers.h`):
+Writes a CGI-formatted HTTP response to stdout: `Status:`,
+`Content-Type: text/plain; charset=utf-8`, and ten security headers drawn
+from `SECURITY_HEADERS_BLOCK` (see `security_headers.h`).  The `charset=utf-8`
+declaration ensures browsers correctly render the localized response body in
+any of the 38 supported languages:
 
 | Header | Value |
 |---|---|
@@ -117,7 +120,14 @@ security headers drawn from `SECURITY_HEADERS_BLOCK` (see `security_headers.h`):
 | `X-Permitted-Cross-Domain-Policies` | `none` |
 
 ### `alarm_handler()` (SIGALRM handler)
-Called when `SIGALRM` fires after `POST_READ_TIMEOUT_SECS` seconds of waiting for stdin. Uses only async-signal-safe functions: reads `g_remote_addr` (pre-populated static buffer), calls `syslog(3)` directly, writes a hardcoded 408 CGI response to `STDOUT_FILENO` with `write(2)`, then calls `_exit(1)`. The response includes the same ten security headers via `SECURITY_HEADERS_BLOCK` — the macro is concatenated into the static string at compile time so `respond()` and `alarm_handler()` can never diverge.
+Called when `SIGALRM` fires after `POST_READ_TIMEOUT_SECS` seconds of waiting
+for stdin.  Uses only async-signal-safe functions: reads `g_remote_addr`
+(pre-populated static buffer) and `g_timeout_response` (the pre-built
+localized 408 response, also populated before the alarm is armed), calls
+`syslog(3)`, writes the pre-built response to `STDOUT_FILENO` with `write(2)`,
+then calls `_exit(1)`.  The response buffer includes the ten OWASP security
+headers via `SECURITY_HEADERS_BLOCK`, so `respond()` and `alarm_handler()`
+can never diverge.
 
 ### `isConfigPathSafe()` (static helper)
 Returns 1 only when a config path:
@@ -128,18 +138,66 @@ Returns 1 only when a config path:
 
 ### `runValidator()`
 1. Opens syslog and caches `REMOTE_ADDR` (`cache_remote_addr()`).
-2. **Validates `ALLOWLIST_CONFIG`**: if the env var is set but fails `isConfigPathSafe()`, logs the path injection attempt and returns 400.
-3. **OpenBSD hardening** (`#ifdef __OpenBSD__`): calls `unveil(2)` to restrict filesystem access to `SAFE_CONFIG_DIR`, then `pledge(2)` to `"stdio rpath"`. Failure is fatal (500).
-4. **POST path**:
+2. **Detects locale**: calls `get_localized_strings(getenv("HTTP_ACCEPT_LANGUAGE"))` to obtain the `LocalizedStrings` pointer for the best-matching language.
+3. **Pre-builds the 408 response**: calls `snprintf` to render the localized timeout body into `g_timeout_response` so the signal handler never needs to call non-async-signal-safe functions.
+4. **Validates `ALLOWLIST_CONFIG`**: if the env var is set but fails `isConfigPathSafe()`, logs the path injection attempt and returns 400.
+5. **OpenBSD hardening** (`#ifdef __OpenBSD__`): calls `unveil(2)` to restrict filesystem access to `SAFE_CONFIG_DIR`, then `pledge(2)` to `"stdio rpath"`. Failure is fatal (500).
+6. **POST path**:
    - Rejects requests without `Content-Type: application/x-www-form-urlencoded` (415, logged).
    - Validates `CONTENT_LENGTH` (must be 0–`MAX_BODY_SIZE`; invalid values logged and rejected with 400).
    - Arms `SIGALRM` / `alarm_handler` before reading stdin; disarms it immediately after.
    - Decodes the body as UTF-8 (rejects non-UTF-8 with 400).
-5. **GET path**: reads `QUERY_STRING`.
-6. **Other methods**: logged and rejected with 405.
-7. **Loads the allowlist** via `initWithAllowlistPath:`; failure returns 500.
-8. **Parses** with `parseFormBody:rejectionReason:`; a `nil` return (limit exceeded) is logged and returns 400.
-9. **Validates** with `validateParams:rejectionReason:`; rejection is logged and returns 403. Success returns 200.
+7. **GET path**: reads `QUERY_STRING`.
+8. **Other methods**: logged and rejected with 405.
+9. **Loads the allowlist** via `initWithAllowlistPath:`; failure returns 500.
+10. **Parses** with `parseFormBody:rejectionReason:`; a `nil` return (limit exceeded) is logged and returns 400.
+11. **Validates** with `validateParams:rejectionReason:`; rejection is logged and returns 403. Success returns 200.
 
-### `main()`
+All response bodies passed to `respond()` come from the `LocalizedStrings` struct selected in step 2.
+
+---
+
+## `i18n.h` / `i18n.c` — Multilingual Support
+
+### `LocalizedStrings` struct (`i18n.h`)
+A plain C struct with one `const char *` field per user-visible response
+message (13 fields total): `ok`, `forbidden`, `request_timeout`,
+`missing_request_method`, `invalid_config_path`, `internal_server_error`,
+`invalid_content_type`, `missing_content_length`, `invalid_content_length`,
+`body_not_utf8`, `method_not_allowed`, `allowlist_load_failed`, and
+`request_too_large`.  Every field points to a UTF-8 encoded, NUL-terminated
+C string literal in static storage.
+
+### Per-locale tables (`i18n.c`)
+One `static const LocalizedStrings` struct is defined for each of the
+38 supported languages.  Each struct's fields are UTF-8 string literals
+compiled directly into the binary.  All 494 strings (38 × 13) are
+self-contained and require no runtime allocation or ICU/gettext dependency.
+
+### Language-tag lookup table (`LANG_TABLE`)
+A fixed array of `{ tag, &strings }` pairs maps lowercase BCP 47 tags to
+the corresponding struct pointer.  Full subtag entries (e.g. `"zh-hk"`)
+appear before their primary-subtag entry (`"zh"`) so that the most specific
+match wins.  Multiple entries may point to the same struct (e.g. `"nb"`,
+`"nn"`, and `"no"` all point to `NO`).
+
+### `get_localized_strings()` (`i18n.c`)
+Parses the `accept_language` string (the value of `HTTP_ACCEPT_LANGUAGE`)
+according to the following algorithm:
+
+1. Walk comma-separated language ranges in the order they appear (browsers
+   send them highest-priority first).
+2. For each range, strip optional `;q=…` quality value and leading/trailing
+   ASCII whitespace, then lowercase the tag.
+3. **Pass 1** — full tag: scan `LANG_TABLE` for an exact match.
+4. **Pass 2** — primary subtag: if the tag contains `'-'`, extract the part
+   before the first `'-'` and scan `LANG_TABLE` again.
+5. Return the first match found; fall back to US English if no range matches.
+
+The function is pure C, performs no heap allocation, and is safe to call in
+any context.
+
+---
+
+## `main()` (in `main.m`)
 Creates an `NSAutoreleasePool`, calls `runValidator()`, calls `closelog()`, drains the pool, and exits with `runValidator()`'s return code.
