@@ -42,7 +42,47 @@ behind an optional `relayd(8)` TLS relay.
    IP address.  Log messages can be forwarded to a remote syslog collector
    via `/etc/syslog.conf`.
 10. Every response includes security headers: `X-Content-Type-Options: nosniff`,
-    `Cache-Control: no-store`, and `X-Frame-Options: DENY`.
+     `Cache-Control: no-store`, and `X-Frame-Options: DENY`.
+
+## Security review (2026-05-12)
+
+### Scope and method
+
+- Reviewed:
+  - `/home/runner/work/OBJC-allowlisting/OBJC-allowlisting/src/main.m`
+  - `/home/runner/work/OBJC-allowlisting/OBJC-allowlisting/src/RequestValidator.m`
+  - `/home/runner/work/OBJC-allowlisting/OBJC-allowlisting/src/security_headers.h`
+  - `/home/runner/work/OBJC-allowlisting/OBJC-allowlisting/src/i18n.c`
+  - `/home/runner/work/OBJC-allowlisting/OBJC-allowlisting/config/httpd.conf.example`
+  - `/home/runner/work/OBJC-allowlisting/OBJC-allowlisting/config/relayd.conf.example`
+- Attempted baseline test run: `make test` (failed in this environment because GNUstep Objective-C toolchain is not installed: missing `gnustep-config` / `cc1obj`).
+
+### Security strengths observed
+
+- Strict allowlist model: unknown keys are rejected and values are constrained by exact-list or full-regex rules.
+- Request hardening limits are enforced (parameter count, key/value byte sizes, max POST body size, POST read timeout).
+- OpenBSD sandboxing is used (`unveil` + `pledge`) when compiled on OpenBSD.
+- Security headers are centrally defined and reused by both normal and timeout response paths.
+- Security-relevant events are logged with source IP context.
+
+### Findings
+
+| Severity | Finding | Evidence | Risk |
+|---|---|---|---|
+| Medium | POST `Content-Type` validation is prefix-based, not exact. | `src/main.m`: `strncasecmp(ct, "application/x-www-form-urlencoded", ...)` | Values like `application/x-www-form-urlencoded-malicious` can pass validation unexpectedly. |
+| Medium | `SIGALRM` handler uses `syslog()`, which is not async-signal-safe. | `src/main.m` `alarm_handler()` calls `syslog(...)` | Can cause undefined behavior or deadlock during timeout handling (availability risk). |
+| Low | Rejection reasons include user-controlled parameter keys and are logged without newline sanitization. | `src/RequestValidator.m` builds reasons with `'%@'` key; `src/main.m` logs reason text | Crafted keys may enable log-forging/multiline log injection in some logging pipelines. |
+
+### Recommended remediation order
+
+1. Replace prefix-based content-type check with strict media-type parsing (allowing optional parameters like `; charset=UTF-8` safely).
+2. Make timeout signal path fully async-signal-safe (remove `syslog()` from signal handler; log outside handler or via safer design).
+3. Sanitize log-bound strings (strip/escape CR/LF and other control characters before logging user-derived values).
+
+### Residual risk and operational notes
+
+- Security posture is generally strong for an allowlisting gate, especially with bounded parsing and OpenBSD hardening hooks.
+- Final confidence should include running the full test suite in a GNUstep-capable environment and adding regression tests for the findings above once fixed.
 
 ## Repository layout
 
